@@ -1,13 +1,19 @@
 package cmd
 
 import (
+	"crypto/tls"
+	"encoding/json"
 	"fmt"
-	"github.com/chrisleavoy/vtm_metrics/3.10"
-	"github.com/spf13/cobra"
+	"io/ioutil"
 	"log"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
+	"time"
+
+	vtm "github.com/pulse-vadc/go-vtm/6.1"
+	"github.com/spf13/cobra"
 )
 
 func Execute() {
@@ -20,6 +26,47 @@ func Execute() {
 var (
 	wg sync.WaitGroup
 )
+
+type nodeList struct {
+	Nodes []node `json:"children"`
+}
+
+type node struct {
+	Name string `json:"name"`
+}
+
+func listNodes(serviceURL string, user string, pass string, tlsSkipVerify bool) ([]node, error) {
+	url := fmt.Sprintf("%s/tm/6.1/status/local_tm/statistics/nodes/node", serviceURL)
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: tlsSkipVerify},
+	}
+	httpClient := http.Client{
+		Timeout:   time.Second * 1,
+		Transport: tr,
+	}
+
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.SetBasicAuth(user, pass)
+	res, getErr := httpClient.Do(req)
+	if getErr != nil {
+		return nil, err
+	}
+	body, readErr := ioutil.ReadAll(res.Body)
+	if readErr != nil {
+		return nil, err
+	}
+
+	nodes := nodeList{}
+	jsonErr := json.Unmarshal(body, &nodes)
+	if jsonErr != nil {
+		return nil, err
+	}
+
+	return nodes.Nodes, nil
+}
 
 var rootCmd = &cobra.Command{
 	Use:   "vtm_metrics",
@@ -42,13 +89,13 @@ var rootCmd = &cobra.Command{
 		// there is no bulk-get for metrics from the VTM, so we need to send a number of HTTP GET.
 		// We do them asynchronously to avoid delays.
 		// vtm.VirtualTrafficManager.newConnector() was monkey patched to limit MaxConnsPerHost: 25
-		doAsyncStatsGathering(v)
+		doAsyncStatsGathering(v, url, user, pass, skipSSLVerify)
 
 		wg.Wait()
 	},
 }
 
-func doAsyncStatsGathering(v *vtm.VirtualTrafficManager) {
+func doAsyncStatsGathering(v *vtm.VirtualTrafficManager, url string, user string, pass string, tlsSkipVerify bool) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -130,17 +177,17 @@ func doAsyncStatsGathering(v *vtm.VirtualTrafficManager) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		nodes, err := v.ListNodes()
+		nodes, err := listNodes(url, user, pass, tlsSkipVerify)
 		if err != nil {
 			log.Printf("ERROR: %+v\n", err)
 		}
 		if err == nil {
-			wg.Add(len(*nodes))
-			for _, node := range *nodes {
+			wg.Add(len(nodes))
+			for _, node := range nodes {
 				go func(node string) {
 					defer wg.Done()
 					nodeStats(v, node)
-				}(node)
+				}(node.Name)
 			}
 		}
 	}()
@@ -155,7 +202,7 @@ func globalStats(v *vtm.VirtualTrafficManager) {
 
 	// TODO host tag may not be the target
 	fmt.Printf(
-		"vtm %s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di\n",
+		"vtm %s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di\n",
 		"data_entries", *s.Statistics.DataEntries,
 		"data_memory_usage", *s.Statistics.DataMemoryUsage,
 		"events_seen", *s.Statistics.EventsSeen,
@@ -203,13 +250,13 @@ func globalStats(v *vtm.VirtualTrafficManager) {
 		"ssl_client_cert_not_sent", *s.Statistics.SslClientCertNotSent,
 		"ssl_client_cert_revoked", *s.Statistics.SslClientCertRevoked,
 		"ssl_connections", *s.Statistics.SslConnections,
-		"ssl_handshake_sslv2", *s.Statistics.SslHandshakeSslv2,
 		"ssl_handshake_sslv3", *s.Statistics.SslHandshakeSslv3,
-		"ssl_handshake_t_l_sv1", *s.Statistics.SslHandshakeTLSv1,
-		"ssl_handshake_t_l_sv11", *s.Statistics.SslHandshakeTLSv11,
-		"ssl_handshake_t_l_sv12", *s.Statistics.SslHandshakeTLSv12,
-		"ssl_session_id_disk_cache_hit", *s.Statistics.SslSessionIdDiskCacheHit,
-		"ssl_session_id_disk_cache_miss", *s.Statistics.SslSessionIdDiskCacheMiss,
+		"ssl_handshake_t_l_sv1", *s.Statistics.SslHandshakeTlsv1,
+		"ssl_handshake_t_l_sv11", *s.Statistics.SslHandshakeTlsv11,
+		"ssl_handshake_t_l_sv12", *s.Statistics.SslHandshakeTlsv12,
+		"ssl_handshake_t_l_sv13", *s.Statistics.SslHandshakeTlsv13,
+		// "ssl_session_id_disk_cache_hit", *s.Statistics.SslSessionIdDiskCacheHit,
+		// "ssl_session_id_disk_cache_miss", *s.Statistics.SslSessionIdDiskCacheMiss,
 		"ssl_session_id_mem_cache_hit", *s.Statistics.SslSessionIdMemCacheHit,
 		"ssl_session_id_mem_cache_miss", *s.Statistics.SslSessionIdMemCacheMiss,
 		"sys_cpu_busy_percent", *s.Statistics.SysCpuBusyPercent,
@@ -227,11 +274,11 @@ func globalStats(v *vtm.VirtualTrafficManager) {
 		"total_backend_server_errors", *s.Statistics.TotalBackendServerErrors,
 		"total_bad_dns_packets", *s.Statistics.TotalBadDnsPackets,
 		"total_bytes_in", *s.Statistics.TotalBytesIn,
-		"total_bytes_in_hi", *s.Statistics.TotalBytesInHi,
-		"total_bytes_in_lo", *s.Statistics.TotalBytesInLo,
+		// "total_bytes_in_hi", *s.Statistics.TotalBytesInHi,
+		// "total_bytes_in_lo", *s.Statistics.TotalBytesInLo,
 		"total_bytes_out", *s.Statistics.TotalBytesOut,
-		"total_bytes_out_hi", *s.Statistics.TotalBytesOutHi,
-		"total_bytes_out_lo", *s.Statistics.TotalBytesOutLo,
+		// "total_bytes_out_hi", *s.Statistics.TotalBytesOutHi,
+		// "total_bytes_out_lo", *s.Statistics.TotalBytesOutLo,
 		"total_conn", *s.Statistics.TotalConn,
 		"total_current_conn", *s.Statistics.TotalCurrentConn,
 		"total_dns_responses", *s.Statistics.TotalDnsResponses,
@@ -252,15 +299,14 @@ func vsStats(v *vtm.VirtualTrafficManager, vs string) {
 	}
 
 	fmt.Printf(
-		"vtm_vs,%s=%s %s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=\"%s\",%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di\n",
-		"vs",
-		escape(vs),
+		"vtm_vs,%s=%s %s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=\"%s\",%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di\n",
+		"vs", escape(vs),
 		"bytes_in", *s.Statistics.BytesIn,
-		"bytes_in_hi", *s.Statistics.BytesInHi,
-		"bytes_in_lo", *s.Statistics.BytesInLo,
+		// "bytes_in_hi", *s.Statistics.BytesInHi,
+		// "bytes_in_lo", *s.Statistics.BytesInLo,
 		"bytes_out", *s.Statistics.BytesOut,
-		"bytes_out_hi", *s.Statistics.BytesOutHi,
-		"bytes_out_lo", *s.Statistics.BytesOutLo,
+		// "bytes_out_hi", *s.Statistics.BytesOutHi,
+		// "bytes_out_lo", *s.Statistics.BytesOutLo,
 		"cert_status_requests", *s.Statistics.CertStatusRequests,
 		"cert_status_responses", *s.Statistics.CertStatusResponses,
 		"connect_timed_out", *s.Statistics.ConnectTimedOut,
@@ -272,8 +318,8 @@ func vsStats(v *vtm.VirtualTrafficManager, vs string) {
 		"discard", *s.Statistics.Discard,
 		"gzip", *s.Statistics.Gzip,
 		"gzip_bytes_saved", *s.Statistics.GzipBytesSaved,
-		"gzip_bytes_saved_hi", *s.Statistics.GzipBytesSavedHi,
-		"gzip_bytes_saved_lo", *s.Statistics.GzipBytesSavedLo,
+		// "gzip_bytes_saved_hi", *s.Statistics.GzipBytesSavedHi,
+		// "gzip_bytes_saved_lo", *s.Statistics.GzipBytesSavedLo,
 		"http_cache_hit_rate", *s.Statistics.HttpCacheHitRate,
 		"http_cache_hits", *s.Statistics.HttpCacheHits,
 		"http_cache_lookups", *s.Statistics.HttpCacheLookups,
@@ -293,22 +339,22 @@ func vsStats(v *vtm.VirtualTrafficManager, vs string) {
 		"protocol", stringFieldEscape(*s.Statistics.Protocol),
 		"sip_rejected_requests", *s.Statistics.SipRejectedRequests,
 		"sip_total_calls", *s.Statistics.SipTotalCalls,
-		//"total_conn", *s.Statistics.TotalConn,
+		// "total_conn", *s.Statistics.TotalConn,
 		"total_dgram", *s.Statistics.TotalDgram,
 		"total_http1_requests", *s.Statistics.TotalHttp1Requests,
-		"total_http1_requests_hi", *s.Statistics.TotalHttp1RequestsHi,
-		"total_http1_requests_lo", *s.Statistics.TotalHttp1RequestsLo,
+		// "total_http1_requests_hi", *s.Statistics.TotalHttp1RequestsHi,
+		// "total_http1_requests_lo", *s.Statistics.TotalHttp1RequestsLo,
 		"total_http2_requests", *s.Statistics.TotalHttp2Requests,
-		"total_http2_requests_hi", *s.Statistics.TotalHttp2RequestsHi,
-		"total_http2_requests_lo", *s.Statistics.TotalHttp2RequestsLo,
+		// "total_http2_requests_hi", *s.Statistics.TotalHttp2RequestsHi,
+		// "total_http2_requests_lo", *s.Statistics.TotalHttp2RequestsLo,
 		"total_http_requests", *s.Statistics.TotalHttpRequests,
-		"total_http_requests_hi", *s.Statistics.TotalHttpRequestsHi,
-		"total_http_requests_lo", *s.Statistics.TotalHttpRequestsLo,
+		// "total_http_requests_hi", *s.Statistics.TotalHttpRequestsHi,
+		// "total_http_requests_lo", *s.Statistics.TotalHttpRequestsLo,
 		"total_requests", *s.Statistics.TotalRequests,
-		"total_requests_hi", *s.Statistics.TotalRequestsHi,
-		"total_requests_lo", *s.Statistics.TotalRequestsLo,
-		"total_tcp_reset", *s.Statistics.TotalTcpReset,
-		"total_udp_unreachables", *s.Statistics.TotalUdpUnreachables,
+		// "total_requests_hi", *s.Statistics.TotalRequestsHi,
+		// "total_requests_lo", *s.Statistics.TotalRequestsLo,
+		// "total_tcp_reset", *s.Statistics.TotalTcpReset,
+		// "total_udp_unreachables", *s.Statistics.TotalUdpUnreachables,
 		"udp_timed_out", *s.Statistics.UdpTimedOut,
 	)
 }
@@ -377,18 +423,17 @@ func poolStats(v *vtm.VirtualTrafficManager, pool string) {
 		return
 	}
 
-	//
 	fmt.Printf(
-		"vtm_pool,%s=%s %s=\"%s\",%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=\"%s\",%s=%di,%s=%di,%s=\"%s\",%s=%di\n",
+		"vtm_pool,%s=%s %s=\"%s\",%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=\"%s\",%s=%di,%s=%di,%s=\"%s\",%s=%di\n",
 		"pool",
 		escape(pool),
 		"algorithm", escape(*s.Statistics.Algorithm),
 		"bytes_in", *s.Statistics.BytesIn,
-		"bytes_in_hi", *s.Statistics.BytesInHi,
-		"bytes_in_lo", *s.Statistics.BytesInLo,
+		// "bytes_in_hi", *s.Statistics.BytesInHi,
+		// "bytes_in_lo", *s.Statistics.BytesInLo,
 		"bytes_out", *s.Statistics.BytesOut,
-		"bytes_out_hi", *s.Statistics.BytesOutHi,
-		"bytes_out_lo", *s.Statistics.BytesOutLo,
+		// "bytes_out_hi", *s.Statistics.BytesOutHi,
+		// "bytes_out_lo", *s.Statistics.BytesOutLo,
 		"conns_queued", *s.Statistics.ConnsQueued,
 		"disabled", *s.Statistics.Disabled,
 		"draining", *s.Statistics.Draining,
@@ -414,15 +459,13 @@ func nodeStats(v *vtm.VirtualTrafficManager, node string) {
 		return
 	}
 
-	//
 	fmt.Printf(
-		"vtm_node,%s=%s %s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=\"%s\",%s=%di\n",
-		"node",
-		escape(node),
-		"bytes_from_node_hi", *s.Statistics.BytesFromNodeHi,
-		"bytes_from_node_lo", *s.Statistics.BytesFromNodeLo,
-		"bytes_to_node_hi", *s.Statistics.BytesToNodeHi,
-		"bytes_to_node_lo", *s.Statistics.BytesToNodeLo,
+		"vtm_node,%s=%s %s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=%di,%s=\"%s\",%s=%di\n",
+		"node", escape(node),
+		// "bytes_from_node_hi", *s.Statistics.BytesFromNodeHi,
+		// "bytes_from_node_lo", *s.Statistics.BytesFromNodeLo,
+		// "bytes_to_node_hi", *s.Statistics.BytesToNodeHi,
+		// "bytes_to_node_lo", *s.Statistics.BytesToNodeLo,
 		"current_conn", *s.Statistics.CurrentConn,
 		"current_requests", *s.Statistics.CurrentRequests,
 		"errors", *s.Statistics.Errors,
